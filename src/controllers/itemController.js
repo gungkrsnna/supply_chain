@@ -2,7 +2,7 @@
 "use strict";
 
 const itemService = require("../services/itemService");
-const categoryItemService = require("../services/categoryitemService");
+const categoryItemService = require("../services/categoryItemService");
 const uomService = require("../services/uomService");
 
 const fs = require('fs');
