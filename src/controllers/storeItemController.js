@@ -18,8 +18,6 @@ function parseIsProductionQuery(v) {
   return undefined;
 }
 
-
-
 async function listItemsByStore(req, res) {
   try {
     const storeId = Number(req.params.storeId);

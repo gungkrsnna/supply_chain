@@ -14,6 +14,25 @@ module.exports = {
     }
   },
 
+    async listForBrand(req, res) {
+    const brandId = req.params.brandId;
+    try {
+      if (!brandId) return res.status(400).json({ success: false, message: 'brandId required' });
+
+      const recipes = await RecipeService.listRecipesForBrand(brandId);
+      return res.json({ success: true, data: recipes });
+    } catch (err) {
+      // lebih lengkap: tampilkan stack ke console dan kirim sedikit detail ke client (untuk debugging)
+      console.error('listForBrand error:', err && err.stack ? err.stack : err);
+      return res.status(err.status || 500).json({
+        success: false,
+        message: err.message || 'Server error',
+        detail: (process.env.NODE_ENV !== 'production') ? (err.stack || String(err)) : undefined
+      });
+    }
+  },
+
+
   async update(req, res) {
     try {
       const id = req.params.id;

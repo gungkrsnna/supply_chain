@@ -1,9 +1,13 @@
-// models/storeRequestItem.js
 "use strict";
 module.exports = (sequelize, DataTypes) => {
   const StoreRequestItem = sequelize.define("StoreRequestItem", {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    store_request_id: { type: DataTypes.INTEGER, allowNull: false },
+    id: {
+      type: DataTypes.STRING(36),
+      primaryKey: true,
+      allowNull: false,
+      // optional: defaultValue: DataTypes.UUIDV4
+    },
+    store_request_id: { type: DataTypes.STRING(36), allowNull: false },
     item_id: { type: DataTypes.INTEGER, allowNull: false },
     requested_qty: { type: DataTypes.DECIMAL(18,4), allowNull: false, defaultValue: 0 },
     uom_id: { type: DataTypes.INTEGER, allowNull: true },

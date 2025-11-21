@@ -25,6 +25,9 @@ const sfgRoutes = require('./routes/sfgRoutes');
 const recipeRoutes = require('./routes/recipeRoutes');
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const storeRequestRoutes = require('./routes/storeRequestRoutes');
+const adminRoutes = require("./routes/adminRoutes");
+const targetProductionRoutes = require("./routes/targetProductionRoutes");
+const centralRoutes = require("./routes/centralItems");
 
 
 const app = express();
@@ -77,6 +80,10 @@ app.use('/api/item-components', itemComponentsRoutes);
 app.use('/api/brands', brandRoutes);
 app.use('/api/sfgs', sfgRoutes);
 app.use('/api/recipes', recipeRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/target-production', targetProductionRoutes);
+app.use("/api/central", centralRoutes);
+
 
 // serve static uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

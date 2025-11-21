@@ -287,12 +287,6 @@ module.exports = {
     });
   },
 
-
-
-  /**
- * Find items by brand code prefix (e.g. 'PA' -> code LIKE 'PA.%')
- * Usage: await itemService.findItemsByCodePrefix('PA', { q: 'tepung', is_production: 0, limit: 200 });
- */
   // services/itemService.js (di dalam module.exports)
   async findItemsByCodePrefix(brandKode, options = {}) {
     const { q, is_production, limit = 200 } = options;
@@ -424,8 +418,6 @@ module.exports = {
     });
   },
 
-
-  
 
   // delete
   async deleteItem(id) {

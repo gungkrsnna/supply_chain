@@ -11,6 +11,7 @@ module.exports = (sequelize, DataTypes) => {
       name: { type: DataTypes.STRING, allowNull: false },
       description: { type: DataTypes.TEXT },
       is_production: { type: DataTypes.BOOLEAN, defaultValue: false },
+      image: { type: DataTypes.STRING, allowNull: true }, // new
     },
     {
       tableName: "Items",
