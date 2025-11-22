@@ -23,137 +23,457 @@ module.exports = {
    * - type (string, required)
    * - reference, note, allowNegative, actorId
    */
-  async recordTransaction({
-    storeId,
+  // paste menggantikan async recordTransaction({ ... }) { ... } di file src/services/inventoryService.js
+
+// replace your current function with this recommended version
+// replace existing async recordTransaction({...}) with this full implementation
+async recordTransaction({
+  storeId,
+  itemId,
+  measurementId = null,
+  quantity = null,
+  measurementEntries = null,
+  customGrams = null,
+  type,
+  reference = null,
+  note = null,
+  allowNegative = false,
+  actorId = null,
+  setAbsolute = false,
+  from_store_id = null,
+  to_store_id = null,
+  _skipTransferSplit = false
+}) {
+  if (!storeId || !itemId || !type) {
+    throw new Error("Missing required params for recordTransaction (storeId, itemId, type)");
+  }
+
+  // keep original for trace
+  const originalType = String(type ?? "");
+  const originalTypeUpper = originalType.toUpperCase();
+
+  // canonical processing token
+  let normType = originalTypeUpper;
+  if (normType === "TRANSFER_OUT") normType = "OUT";
+  if (normType === "TRANSFER_IN")  normType = "IN";
+
+  // validate supported canonical tokens (TRANSFER handled specially)
+  const ALLOWED_CANONICAL = ["IN", "OUT", "ADJUSTMENT", "TRANSFER"];
+  if (!ALLOWED_CANONICAL.includes(normType)) {
+    throw new Error(`Unsupported transaction type: ${originalType}`);
+  }
+
+  // helper to pick conversion value
+  const pickConversionValue = (measRow) => {
+    return Number(measRow.value_in_base ?? measRow.value_in_smallest ?? measRow.value_in_grams ?? measRow.value ?? 0);
+  };
+
+  const hasLegacyQty = (quantity !== undefined && quantity !== null);
+  const hasEntries = Array.isArray(measurementEntries) && measurementEntries.length > 0;
+  const hasCustom = (customGrams !== undefined && customGrams !== null);
+
+  if (!hasLegacyQty && !hasEntries && !hasCustom) {
+    throw new Error("Missing quantity information: provide quantity OR measurementEntries OR customGrams");
+  }
+
+  // compute convertedQty and breakdown (same logic as before)
+  const computeConvertedAndBreakdown = async () => {
+    let convertedQty = 0;
+    let breakdown = null;
+
+    if (hasCustom) {
+      convertedQty = Number(customGrams) || 0;
+      if (hasEntries) {
+        breakdown = { measurementEntries: [], customGrams: Number(customGrams) };
+        const ids = measurementEntries.map(e => Number(e.measurementId ?? e.measurement_id)).filter(id => id && !Number.isNaN(id));
+        if (ids.length > 0) {
+          const rows = await ItemMeasurement.findAll({ where: { id: ids } });
+          const map = {};
+          rows.forEach(r => { map[r.id] = pickConversionValue(r); });
+          for (const e of measurementEntries) {
+            const mId = Number(e.measurementId ?? e.measurement_id);
+            const cnt = Number(e.count ?? e.qty ?? e.quantity ?? 0);
+            const per = map[mId] ?? 0;
+            const subtotal = (per && cnt) ? per * cnt : 0;
+            breakdown.measurementEntries.push({ measurementId: mId, count: cnt, conversionPer: per, subtotal });
+          }
+        } else {
+          breakdown.measurementEntries = measurementEntries.map(e => ({ measurementId: Number(e.measurementId ?? e.measurement_id), count: Number(e.count ?? e.qty ?? 0) }));
+        }
+      } else {
+        breakdown = { measurementEntries: [], customGrams: Number(customGrams) };
+      }
+    } else {
+      if (hasEntries) {
+        breakdown = { measurementEntries: [], customGrams: 0 };
+        for (const e of measurementEntries) {
+          const mId = Number(e.measurementId ?? e.measurement_id);
+          const cnt = Number(e.count ?? e.qty ?? e.quantity ?? 0);
+          if (!mId || Number.isNaN(cnt)) throw new Error("Invalid measurementEntries (measurementId and count required)");
+          const meas = await ItemMeasurement.findByPk(mId);
+          if (!meas) throw new Error(`Measurement id ${mId} not found`);
+          const conv = pickConversionValue(meas);
+          if (!conv || Number.isNaN(conv)) throw new Error(`Measurement id ${mId} missing conversion value`);
+          const add = conv * cnt;
+          convertedQty += add;
+          breakdown.measurementEntries.push({ measurementId: mId, count: cnt, conversionPer: conv, subtotal: add });
+        }
+      } else if (hasLegacyQty) {
+        if (measurementId) {
+          const meas = await ItemMeasurement.findByPk(Number(measurementId));
+          if (!meas) throw new Error("Measurement not found");
+          const conv = pickConversionValue(meas);
+          if (!conv || Number.isNaN(conv)) throw new Error("Measurement missing conversion value");
+          convertedQty = conv * Number(quantity);
+          breakdown = { measurementEntries: [{ measurementId: Number(measurementId), count: Number(quantity), conversionPer: conv, subtotal: convertedQty }], customGrams: 0 };
+        } else {
+          convertedQty = Number(quantity);
+          breakdown = { measurementEntries: [], customGrams: convertedQty };
+        }
+      } else {
+        convertedQty = Number(customGrams || 0);
+        breakdown = { measurementEntries: [], customGrams: convertedQty };
+      }
+    }
+
+    return { convertedQty, breakdown };
+  };
+
+  // Run inside a DB transaction
+  return await sequelize.transaction(async (tx) => {
+    const item = await Item.findByPk(itemId, { transaction: tx, include: [{ model: Uom, as: "uom" }] });
+    if (!item) throw new Error("Item not found");
+
+    // compute converted & breakdown (we allowed ItemMeasurement.* queries inside compute)
+    const { convertedQty, breakdown } = await computeConvertedAndBreakdown();
+
+    // helper: determine legacy ledger quantity for human-facing quantity field
+    let ledgerQuantity = null;
+    if (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1) {
+      ledgerQuantity = Number(breakdown.measurementEntries[0].count);
+    } else if (!hasEntries && hasLegacyQty && !measurementId) {
+      ledgerQuantity = Number(quantity);
+    }
+
+    // Normalized processing token
+    // (keep normType from earlier but ensure casing)
+    normType = String(normType).toUpperCase();
+
+    // Map canonical to DB enum ('in'|'out'|'adjustment')
+    const dbTypeMap = { IN: "in", OUT: "out", ADJUSTMENT: "adjustment" };
+    // NOTE: TRANSFER is special -> will be split into OUT + IN below
+    const isTransfer = (normType === "TRANSFER");
+
+    // If it's explicit TRANSFER (move between stores) -> do split here *atomically*
+    if (isTransfer) {
+      if (!from_store_id || !to_store_id) throw new Error("Transfer requires from_store_id and to_store_id");
+
+      // lock both store items (source and destination)
+      let srcStoreItem = await StoreItem.findOne({ where: { store_id: from_store_id, item_id: itemId }, transaction: tx, lock: tx.LOCK.UPDATE });
+      if (!srcStoreItem) srcStoreItem = await StoreItem.create({ store_id: from_store_id, item_id: itemId, stock: 0 }, { transaction: tx });
+
+      let dstStoreItem = await StoreItem.findOne({ where: { store_id: to_store_id, item_id: itemId }, transaction: tx, lock: tx.LOCK.UPDATE });
+      if (!dstStoreItem) dstStoreItem = await StoreItem.create({ store_id: to_store_id, item_id: itemId, stock: 0 }, { transaction: tx });
+
+      // validate source stock for OUT
+      if (!allowNegative && Number(convertedQty) > Number(srcStoreItem.stock)) {
+        throw new Error(`Insufficient stock on source store: only ${Number(srcStoreItem.stock)} available, requested ${Number(convertedQty)}`);
+      }
+
+      const unitLabel = item.base_uom_label ?? (item.uom ? item.uom.name : null) ?? "base unit";
+
+      // create OUT ledger on source
+      console.log("DBG creating TRANSFER OUT ledger (atomic split)", { from_store_id, to_store_id, convertedQty, originalTypeUpper });
+      const outLedger = await StoreItemTransaction.create({
+        store_id: from_store_id,
+        item_id: itemId,
+        measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
+          ? breakdown.measurementEntries[0].measurementId
+          : (measurementId || null),
+        type: dbTypeMap.OUT,
+        transaction_type: originalTypeUpper,
+        quantity: ledgerQuantity,
+        converted_qty: Number(convertedQty),
+        reference,
+        note: note ?? `Transfer to store ${to_store_id}`,
+        measurement_breakdown: breakdown,
+        created_by: actorId ?? null,
+        from_store_id: from_store_id,
+        to_store_id: to_store_id,
+        is_in: false
+      }, { transaction: tx });
+
+      // deduct source stock
+      srcStoreItem.stock = Number(srcStoreItem.stock) - Number(convertedQty);
+      if (srcStoreItem.stock < 0 && !allowNegative) throw new Error("Insufficient stock after deduction");
+      await srcStoreItem.save({ transaction: tx });
+
+      // create IN ledger on destination
+      console.log("DBG creating TRANSFER IN ledger (atomic split)", { from_store_id, to_store_id, convertedQty, originalTypeUpper });
+      const inLedger = await StoreItemTransaction.create({
+        store_id: to_store_id,
+        item_id: itemId,
+        measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
+          ? breakdown.measurementEntries[0].measurementId
+          : (measurementId || null),
+        type: dbTypeMap.IN,
+        transaction_type: originalTypeUpper,
+        quantity: ledgerQuantity,
+        converted_qty: Number(convertedQty),
+        reference,
+        note: note ?? `Transfer from store ${from_store_id}`,
+        measurement_breakdown: breakdown,
+        created_by: actorId ?? null,
+        from_store_id: from_store_id,
+        to_store_id: to_store_id,
+        is_in: true
+      }, { transaction: tx });
+
+      // increase dest stock
+      dstStoreItem.stock = Number(dstStoreItem.stock) + Number(convertedQty);
+      await dstStoreItem.save({ transaction: tx });
+
+      // return both ledgers + storeItem snapshots
+      return { ledger: { out: outLedger, in: inLedger }, storeItem: { from: srcStoreItem, to: dstStoreItem } };
+    }
+
+    // ---- Single-store flow (IN / OUT / ADJUSTMENT) ----
+    // lock/get storeItem
+    let storeItem = await StoreItem.findOne({ where: { store_id: storeId, item_id: itemId }, transaction: tx, lock: tx.LOCK.UPDATE });
+    if (!storeItem) storeItem = await StoreItem.create({ store_id: storeId, item_id: itemId, stock: 0 }, { transaction: tx });
+
+    // For OUT-like validation: consider originalTypeUpper too (to cover TRANSFER_OUT alias cases)
+    const outLike = ["OUT", "TRANSFER_OUT", "PRODUCTION_USE"];
+    if (!allowNegative && (outLike.includes(originalTypeUpper) || outLike.includes(normType))) {
+      if (Number(convertedQty) > Number(storeItem.stock)) {
+        throw new Error(`Insufficient stock: only ${Number(storeItem.stock)} ${item.base_uom_label ?? "base unit"} available, requested ${Number(convertedQty)}`);
+      }
+    }
+
+    // choose dbType to write (must match your enum)
+    const dbType = dbTypeMap[normType] ?? (() => { throw new Error(`Unsupported database type mapping for ${normType}`); })();
+
+    // compute boolean is_in from original intent
+    const isIncoming = ["IN", "TRANSFER_IN", "LEFTOVER_RETURN"].includes(originalTypeUpper);
+
+    // safe defaults for from/to store fields to avoid NOT NULL DB errors
+    // If browser/client didn't provide from_store_id/to_store_id and DB disallows null, fallback to storeId for sensible cases:
+    const safe_from_store_id = (from_store_id !== undefined && from_store_id !== null) ? from_store_id : (dbType === "out" ? storeId : null);
+    const safe_to_store_id   = (to_store_id   !== undefined && to_store_id   !== null) ? to_store_id   : (dbType === "in"  ? storeId : null);
+
+    console.log("DBG will insert ledger row", { storeId, itemId, dbType, originalTypeUpper, safe_from_store_id, safe_to_store_id, convertedQty });
+
+    // create ledger row
+    const ledger = await StoreItemTransaction.create({
+      store_id: storeId,
+      item_id: itemId,
+      measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
+        ? breakdown.measurementEntries[0].measurementId
+        : (measurementId || null),
+
+      type: dbType,
+      transaction_type: originalTypeUpper,
+      quantity: ledgerQuantity,
+      converted_qty: Number(convertedQty),
+      reference,
+      note,
+      measurement_breakdown: breakdown,
+      created_by: actorId ?? null,
+      from_store_id: safe_from_store_id,
+      to_store_id:   safe_to_store_id,
+      is_in: !!isIncoming
+    }, { transaction: tx });
+
+    // update storeItem stock
+    const positiveTypes = [ "in", "leftover_return" /* left as conceptual; actual mapping uses 'in' */ ];
+    const delta = (dbType === "in" ? 1 : -1) * Number(convertedQty);
+    storeItem.stock = Number(storeItem.stock) + delta;
+    if (storeItem.stock < 0 && !allowNegative) throw new Error("Insufficient stock after update");
+    await storeItem.save({ transaction: tx });
+
+    return { ledger, storeItem };
+  }); // end transaction
+}, // end recordTransaction
+
+
+
+
+
+  /**
+   * Transfer between stores (atomic)
+   * options:
+   * - fromStoreId, toStoreId, itemId (required)
+   * - measurementEntries, customGrams, measurementId, quantity (one-of required)
+   * - reference, note, allowNegative, actorId
+   *
+   * This will create two ledger rows:
+   *  - TRANSFER_OUT for fromStoreId (negative converted_qty)
+   *  - TRANSFER_IN  for toStoreId (positive converted_qty)
+   */
+  async transferBetweenStores({
+    fromStoreId,
+    toStoreId,
     itemId,
-    measurementId = null,
-    quantity = null,
     measurementEntries = null,
     customGrams = null,
-    type,
+    measurementId = null,
+    quantity = null,
     reference = null,
     note = null,
     allowNegative = false,
-    actorId = null,
-    setAbsolute = false
+    actorId = null
   }) {
-    if (!storeId || !itemId || !type) {
-      throw new Error("Missing required params for recordTransaction (storeId, itemId, type)");
+    if (!fromStoreId || !toStoreId || !itemId) {
+      throw new Error("Missing required params for transferBetweenStores (fromStoreId,toStoreId,itemId)");
     }
+    // reuse recordTransaction conversion logic by calling it with setAbsolute=false OR re-calc here.
+    // We'll re-use the conversion logic (copy of conversion part) to compute convertedQty & breakdown.
+    return await sequelize.transaction(async (tx) => {
+      // fetch item
+      const item = await Item.findByPk(itemId, { transaction: tx, include: [{ model: Uom, as: "uom" }] });
+      if (!item) throw new Error("Item not found");
 
-    const hasLegacyQty = (quantity !== undefined && quantity !== null);
-    const hasEntries = Array.isArray(measurementEntries) && measurementEntries.length > 0;
-    const hasCustom = (customGrams !== undefined && customGrams !== null);
+      const pickConversionValue = (measRow) => {
+        return Number(measRow.value_in_base ?? measRow.value_in_smallest ?? measRow.value_in_grams ?? measRow.value ?? 0);
+      };
 
-    if (!hasLegacyQty && !hasEntries && !hasCustom) {
-      throw new Error("Missing quantity information: provide quantity OR measurementEntries OR customGrams");
-    }
+      // compute convertedQty (copy of recordTransaction logic)
+      let convertedQty = 0;
+      let breakdown = null;
+      const hasEntries = Array.isArray(measurementEntries) && measurementEntries.length > 0;
+      const hasLegacyQty = (quantity !== undefined && quantity !== null);
+      const hasCustom = (customGrams !== undefined && customGrams !== null);
 
-    // inside recordTransaction - replace transaction body with this
-      return await sequelize.transaction(async (tx) => {
-        // compute convertedQty (same as before) ...
-        let convertedQty = 0;
-        let breakdown = null;
+      if (!hasEntries && !hasLegacyQty && !hasCustom) {
+        throw new Error("Missing quantity information for transfer: provide measurementEntries OR quantity OR customGrams");
+      }
 
-        // --- compute convertedQty (same code you already have) ---
+      if (hasCustom) {
+        convertedQty = Number(customGrams) || 0;
         if (hasEntries) {
-          breakdown = { measurementEntries: [], customGrams: Number(customGrams || 0) };
-          for (const e of measurementEntries) {
-            const mId = Number(e.measurementId);
-            const cnt = Number(e.count);
-            if (!mId || Number.isNaN(cnt)) {
-              throw new Error("Invalid measurementEntries (measurementId and count required)");
+          breakdown = { measurementEntries: [], customGrams: Number(customGrams) };
+          const ids = measurementEntries.map(e => Number(e.measurementId ?? e.measurement_id)).filter(id => id && !Number.isNaN(id));
+          if (ids.length > 0) {
+            const rows = await ItemMeasurement.findAll({ where: { id: ids }, transaction: tx });
+            const map = {}; rows.forEach(r => { map[r.id] = pickConversionValue(r); });
+            for (const e of measurementEntries) {
+              const mId = Number(e.measurementId ?? e.measurement_id);
+              const cnt = Number(e.count ?? e.qty ?? e.quantity ?? 0);
+              const per = map[mId] ?? 0;
+              const subtotal = (per && cnt) ? per * cnt : 0;
+              breakdown.measurementEntries.push({ measurementId: mId, count: cnt, conversionPer: per, subtotal });
             }
+          } else {
+            breakdown.measurementEntries = measurementEntries.map(e => ({ measurementId: Number(e.measurementId ?? e.measurement_id), count: Number(e.count ?? e.qty ?? 0) }));
+          }
+        } else {
+          breakdown = { measurementEntries: [], customGrams: Number(customGrams) };
+        }
+      } else {
+        if (hasEntries) {
+          breakdown = { measurementEntries: [], customGrams: 0 };
+          for (const e of measurementEntries) {
+            const mId = Number(e.measurementId ?? e.measurement_id);
+            const cnt = Number(e.count ?? e.qty ?? e.quantity ?? 0);
+            if (!mId || Number.isNaN(cnt)) throw new Error("Invalid measurementEntries (measurementId and count required)");
             const meas = await ItemMeasurement.findByPk(mId, { transaction: tx });
             if (!meas) throw new Error(`Measurement id ${mId} not found`);
-            const gramsPer = Number(meas.value_in_grams ?? meas.value ?? 0);
-            if (!gramsPer || Number.isNaN(gramsPer)) {
-              throw new Error(`Measurement id ${mId} missing conversion value (value_in_grams/value)`);
-            }
-            const add = gramsPer * cnt;
+            const conv = pickConversionValue(meas);
+            if (!conv || Number.isNaN(conv)) throw new Error(`Measurement id ${mId} missing conversion value`);
+            const add = conv * cnt;
             convertedQty += add;
-            breakdown.measurementEntries.push({ measurementId: mId, count: cnt, gramsPer, subtotal: add });
+            breakdown.measurementEntries.push({ measurementId: mId, count: cnt, conversionPer: conv, subtotal: add });
           }
-          if (hasCustom) convertedQty += Number(customGrams);
         } else if (hasLegacyQty) {
           if (measurementId) {
             const meas = await ItemMeasurement.findByPk(Number(measurementId), { transaction: tx });
             if (!meas) throw new Error("Measurement not found");
-            const gramsPer = Number(meas.value_in_grams ?? meas.value ?? 0);
-            if (!gramsPer || Number.isNaN(gramsPer)) throw new Error("Measurement missing conversion value");
-            convertedQty = gramsPer * Number(quantity);
-            breakdown = { measurementEntries: [{ measurementId: Number(measurementId), count: Number(quantity), gramsPer, subtotal: convertedQty }], customGrams: 0 };
+            const conv = pickConversionValue(meas);
+            if (!conv || Number.isNaN(conv)) throw new Error("Measurement missing conversion value");
+            convertedQty = conv * Number(quantity);
+            breakdown = { measurementEntries: [{ measurementId: Number(measurementId), count: Number(quantity), conversionPer: conv, subtotal: convertedQty }], customGrams: 0 };
           } else {
             convertedQty = Number(quantity);
             breakdown = { measurementEntries: [], customGrams: convertedQty };
           }
-        } else if (hasCustom) {
-          convertedQty = Number(customGrams);
-          breakdown = { measurementEntries: [], customGrams: convertedQty };
         }
-        // --- end compute convertedQty ---
+      }
 
-        // ensure we have storeItem (lock) before creating ledger so we can validate for OUT
-        let storeItem = await StoreItem.findOne({
-          where: { store_id: storeId, item_id: itemId },
-          transaction: tx,
-          lock: tx.LOCK.UPDATE
-        });
-
-        if (!storeItem) {
-          // create with 0 stock (locked)
-          storeItem = await StoreItem.create({ store_id: storeId, item_id: itemId, stock: 0 }, { transaction: tx });
-        }
-
-        // explicit validation for OUT (friendly error message)
-        if ([TRANSACTION_TYPES.OUT, TRANSACTION_TYPES.TRANSFER_OUT, TRANSACTION_TYPES.PRODUCTION_USE].includes(type)) {
-          if (!allowNegative && (Number(convertedQty) > Number(storeItem.stock))) {
-            throw new Error(`Insufficient stock: only ${Number(storeItem.stock)} g available, requested ${Number(convertedQty)} g`);
-          }
-        }
-
-        // decide ledgerQuantity (same as before)
-        let ledgerQuantity = null;
-        if (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1) {
-          ledgerQuantity = Number(breakdown.measurementEntries[0].count);
-        } else if (!hasEntries && hasLegacyQty && !measurementId) {
-          ledgerQuantity = Number(quantity);
-        } else {
-          ledgerQuantity = null;
-        }
-
-        // create ledger row
-        const ledger = await StoreItemTransaction.create({
-          store_id: storeId,
-          item_id: itemId,
-          measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
-            ? breakdown.measurementEntries[0].measurementId
-            : (measurementId || null),
-          type,
-          quantity: ledgerQuantity,
-          converted_qty: convertedQty,
-          reference,
-          note,
-          measurement_breakdown: breakdown,
-          created_by: actorId ?? null
-        }, { transaction: tx });
-
-        // update storeItem.stock
-        const positiveTypes = [TRANSACTION_TYPES.IN, TRANSACTION_TYPES.TRANSFER_IN, TRANSACTION_TYPES.LEFTOVER_RETURN];
-        const delta = (positiveTypes.includes(type) ? 1 : -1) * Number(convertedQty);
-        const newStock = Number(storeItem.stock) + delta;
-
-        if (newStock < 0 && !allowNegative) {
-          throw new Error("Insufficient stock");
-        }
-
-        storeItem.stock = newStock;
-        await storeItem.save({ transaction: tx });
-
-        return { ledger, storeItem };
+      // LOCK both store items
+      let fromStoreItem = await StoreItem.findOne({
+        where: { store_id: fromStoreId, item_id: itemId },
+        transaction: tx,
+        lock: tx.LOCK.UPDATE
       });
+      if (!fromStoreItem) {
+        fromStoreItem = await StoreItem.create({ store_id: fromStoreId, item_id: itemId, stock: 0 }, { transaction: tx });
+      }
 
+      let toStoreItem = await StoreItem.findOne({
+        where: { store_id: toStoreId, item_id: itemId },
+        transaction: tx,
+        lock: tx.LOCK.UPDATE
+      });
+      if (!toStoreItem) {
+        toStoreItem = await StoreItem.create({ store_id: toStoreId, item_id: itemId, stock: 0 }, { transaction: tx });
+      }
+
+      const unitLabel = item.base_uom_label ?? (item.uom ? item.uom.name : null) ?? "base unit";
+
+      // validate from-store has sufficient stock
+      if (!allowNegative && Number(convertedQty) > Number(fromStoreItem.stock)) {
+        throw new Error(`Insufficient stock in source store: only ${Number(fromStoreItem.stock)} ${unitLabel} available, requested ${Number(convertedQty)} ${unitLabel}`);
+      }
+
+      // create OUT ledger for fromStore
+      const outLedger = await StoreItemTransaction.create({
+        store_id: fromStoreId,
+        item_id: itemId,
+        measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
+          ? breakdown.measurementEntries[0].measurementId : (measurementId || null),
+        type: TRANSACTION_TYPES.TRANSFER_OUT,
+        quantity: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1) ? Number(breakdown.measurementEntries[0].count) : (hasLegacyQty && !measurementId ? Number(quantity) : null),
+        converted_qty: Number(convertedQty),
+        reference,
+        note,
+        measurement_breakdown: breakdown,
+        created_by: actorId ?? null,
+        from_store_id: fromStoreId,
+        to_store_id: toStoreId,
+        is_in: false
+      }, { transaction: tx });
+
+      // create IN ledger for toStore
+      const inLedger = await StoreItemTransaction.create({
+        store_id: toStoreId,
+        item_id: itemId,
+        measurement_id: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1)
+          ? breakdown.measurementEntries[0].measurementId : (measurementId || null),
+        type: TRANSACTION_TYPES.TRANSFER_IN,
+        quantity: (breakdown && Array.isArray(breakdown.measurementEntries) && breakdown.measurementEntries.length === 1) ? Number(breakdown.measurementEntries[0].count) : (hasLegacyQty && !measurementId ? Number(quantity) : null),
+        converted_qty: Number(convertedQty),
+        reference,
+        note,
+        measurement_breakdown: breakdown,
+        created_by: actorId ?? null,
+        from_store_id: fromStoreId,
+        to_store_id: toStoreId,
+        is_in: true
+      }, { transaction: tx });
+
+      // update stocks
+      fromStoreItem.stock = Number(fromStoreItem.stock) - Number(convertedQty);
+      toStoreItem.stock = Number(toStoreItem.stock) + Number(convertedQty);
+
+      if (fromStoreItem.stock < 0 && !allowNegative) throw new Error("Insufficient stock after update");
+
+      await fromStoreItem.save({ transaction: tx });
+      await toStoreItem.save({ transaction: tx });
+
+      return { outLedger, inLedger, fromStoreItem, toStoreItem };
+    });
   },
+
 
   /**
    * Return store_items simple list (paged) — includes basic Item (but not measurements).

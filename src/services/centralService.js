@@ -9,21 +9,32 @@ async function getCentralItem(storeId, itemId) {
   return models.CentralItem.findOne({ where: { store_id: storeId, item_id: itemId } });
 }
 
+// services/centralService.js (ubah findCentralItems)
 async function findCentralItems(storeId, { q = "", limit = 200 } = {}) {
-  const whereItem = {};
-  if (q) {
-    whereItem[Op.or] = [
-      { code: { [Op.like]: `%${q}%` } },
-      { name: { [Op.like]: `%${q}%` } },
+  const itemWhere = {};
+  const search = (q || "").toString().trim();
+  const itemInclude = { model: models.Item, as: "item" };
+
+  if (search) {
+    itemWhere[Op.or] = [
+      { code: { [Op.like]: `%${search}%` } },
+      { name: { [Op.like]: `%${search}%` } },
     ];
+    itemInclude.where = itemWhere;
+    itemInclude.required = true;
+  } else {
+    // no filter on item, but include relation (left join)
+    itemInclude.required = false;
   }
 
   return models.CentralItem.findAll({
     where: { store_id: storeId },
-    include: [{ model: models.Item, as: "item", where: whereItem, required: !!q }],
-    limit,
+    include: [itemInclude],
+    limit: Math.min(Number(limit) || 200, 1000),
+    order: [["updatedAt", "DESC"]],
   });
 }
+
 
 async function adjustStock(storeId, itemId, deltaQty, { type = "adjustment", note = null, measurement_id = null, reference = null, t = null, meta = null, actorId = null } = {}) {
   const sequelize = models.sequelize;

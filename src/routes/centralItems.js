@@ -1,18 +1,18 @@
-// routes/centralItems.js
+// routes/centralItems.js  (update)
 const express = require("express");
 const router = express.Router();
 const centralCtrl = require("../controllers/centralItemController");
 
-// list central items for a central kitchen (GET /api/central/:centralId/items)
+// existing...
 router.get("/:centralId/items", centralCtrl.listCentralItems);
-
-// get single
 router.get("/:centralId/items/:itemId", centralCtrl.getCentralItem);
-
-// adjust stock (POST /api/central/:centralId/items/adjust)
 router.post("/:centralId/items/adjust", centralCtrl.adjustCentralStock);
-
-// transfer to store (POST /api/central/:centralId/transfer-to-store)
 router.post("/:centralId/transfer-to-store", centralCtrl.transferToStore);
+// POST /api/central/:centralId/transactions
+router.post("/:centralId/transactions", centralCtrl.createCentralTransaction);
+
+
+// NEW: return central/store info used by frontend fetchCentralById
+router.get("/:centralId", centralCtrl.getCentral);
 
 module.exports = router;

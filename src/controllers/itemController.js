@@ -33,30 +33,27 @@ function parseIsProductionRaw(v) {
   return undefined;
 }
 
+// gunakan di itemController.js (ganti fungsi yang ada)
 function makeImageUrl(req, imagePath) {
   if (!imagePath) return null;
-  const base = `${req.protocol}://${req.get('host')}`;
+
+  // prefer ENV.APP_URL jika di-set (lebih stabil)
+  const baseEnv = process.env.APP_URL && String(process.env.APP_URL).trim();
+  const hostHeader = `${req.protocol}://${req.get('host')}`;
+  const base = baseEnv || hostHeader;
 
   // normalize value
   let rel = String(imagePath || '').replace(/^\/+/, ''); // remove leading slash(es)
 
-  // If DB already contains "uploads/" prefix, use it directly
-  if (rel.startsWith('uploads/')) {
-    // ensure posix slashes
+  // If DB already contains 'uploads/' or 'items/' prefix, use them
+  if (rel.startsWith('uploads/') || rel.startsWith('items/')) {
     return `${base}/${rel.split(path.sep).join('/')}`;
   }
 
-  // If DB already contains "items/" prefix, prefix with uploads/
-  if (rel.startsWith('items/')) {
-    return `${base}/${rel.split(path.sep).join('/')}`;
-  }
-
-  // Otherwise assume stored as "brandHash/filename" or just "filename"
-  // Serve under /uploads/items/<rel>
+  // Otherwise assume stored as "brandHash/filename" or "filename"
   const urlPath = path.posix.join('uploads', 'items', rel);
   return `${base}/${urlPath}`;
 }
-
 
 
 async function createItem(req, res) {
